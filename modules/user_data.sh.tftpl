@@ -1,0 +1,48 @@
+#!/bin/bash
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -y
+apt-get install -y apache2 php libapache2-mod-php php-mysql
+
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+
+rm -f /var/www/html/index.html
+cat > /var/www/html/index.php <<'PHP'
+<?php
+$az = "__AZ__";
+$error = null;
+$rows = [];
+try {
+    mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
+    $db = new mysqli("${db_host}", "${db_user}", "${db_password}", "${db_name}");
+    $db->query("CREATE TABLE IF NOT EXISTS records (id INT AUTO_INCREMENT PRIMARY KEY, az VARCHAR(20), note VARCHAR(255), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
+    if ($_SERVER["REQUEST_METHOD"] === "POST" && !empty($_POST["note"])) {
+        $stmt = $db->prepare("INSERT INTO records (az, note) VALUES (?, ?)");
+        $stmt->bind_param("ss", $az, $_POST["note"]);
+        $stmt->execute();
+    }
+    $rows = $db->query("SELECT id, az, note, created_at FROM records ORDER BY id DESC LIMIT 20")->fetch_all(MYSQLI_ASSOC);
+} catch (Exception $e) {
+    $error = $e->getMessage();
+}
+?>
+<!DOCTYPE html>
+<html>
+<body>
+  <h1>Servido desde: <?= htmlspecialchars($az) ?></h1>
+  <?php if ($error): ?><p style="color:red">Error de BD: <?= htmlspecialchars($error) ?></p><?php endif; ?>
+  <form method="post">
+    <input name="note" maxlength="255" placeholder="Escribe un registro">
+    <button type="submit">Guardar</button>
+  </form>
+  <ul>
+  <?php foreach ($rows as $r): ?>
+    <li>#<?= $r["id"] ?> [<?= htmlspecialchars($r["az"]) ?>] <?= htmlspecialchars($r["note"]) ?> (<?= $r["created_at"] ?>)</li>
+  <?php endforeach; ?>
+  </ul>
+</body>
+</html>
+PHP
+
+sed -i "s/__AZ__/$AZ/" /var/www/html/index.php
+systemctl restart apache2
