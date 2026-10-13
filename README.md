@@ -45,7 +45,7 @@ flowchart TB
 ## Estructura del repositorio
 
 ```
-modules/webapp/        módulo reutilizable con toda la infraestructura
+modules/               módulo reutilizable con toda la infraestructura
 stage/                 entorno de pruebas (us-east-1), con su propio backend y state
 prod/                  entorno de producción (us-east-2), con su propio backend y state
 s3_backend_origin/     crea el bucket de S3 donde se guardan los states (bootstrap, state local)
@@ -115,10 +115,10 @@ El NAT gateway, el ALB y la RDS cobran por hora aunque no reciban tráfico. El N
 ## Decisiones y limitaciones conocidas
 
 - **Contraseña de RDS por variable sensible.** Se pasa con `TF_VAR_db_password` y la aplicación se conecta como `admin`. Aunque la variable está marcada como `sensitive`, la contraseña acaba en texto plano en el state (que está en un bucket de S3) y en el `user_data` de las instancias, visible en la consola de AWS. Es un paso intermedio consciente, no el diseño final.
-- **IAM auth preparada, pero sin usar.** La instancia tiene `iam_database_authentication_enabled` y el role de las EC2 tiene el permiso `rds-db:connect`, pero la aplicación todavía no entra con tokens. Para usarla hay que crear a mano en MySQL un usuario `webapp` con el plugin de autenticación de IAM, y conectar con SSL.
+- **IAM auth preparada, pero sin usar.** El role de las EC2 ya tiene el permiso `rds-db:connect`, pero la autenticación IAM no está activada en la instancia (la opción está comentada) y la aplicación entra con contraseña. Para usarla hay que activarla, crear a mano en MySQL un usuario `webapp` con el plugin de autenticación de IAM, y conectar con SSL.
 - **Un único NAT gateway.** Está en una sola AZ: si esa AZ cae, las instancias de la otra pierden la salida a internet. Es suficiente para un laboratorio, y la versión de alta disponibilidad (un NAT por AZ) multiplica el coste.
 - **Solo HTTP.** El listener escucha en el puerto 80. HTTPS exigiría un dominio y un certificado en ACM.
-- **Salida de las EC2 abierta a internet** (puertos 80 y 443 hacia `0.0.0.0/0`), porque los mirrors de paquetes no tienen IP fija. Restringirla por dominio requeriría un proxy o AWS Network Firewall.
+- **Salida de las EC2 abierta a internet** (puerto 80 hacia `0.0.0.0/0`, suficiente para `apt`), porque los mirrors de paquetes no tienen IP fija. Restringirla por dominio requeriría un proxy o AWS Network Firewall.
 - **Sin NACLs.** Las security groups cubren la cadena ALB → EC2 → RDS, y las NACLs (stateless) añadirían complejidad sin una necesidad concreta.
 - **`skip_final_snapshot = true`** en la RDS, pensado para un laboratorio que se destruye a menudo. En una producción real estaría en `false`.
 
