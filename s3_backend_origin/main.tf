@@ -5,3 +5,20 @@ provider "aws" {
 resource "aws_s3_bucket" "cursor_backend" {
   bucket = "cursor-backend-5236"
 }
+
+resource "aws_s3_bucket_versioning" "cursor_backend" {
+  bucket = aws_s3_bucket.cursor_backend.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_public_access_block" "cursor_backend" {
+  bucket = aws_s3_bucket.cursor_backend.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
