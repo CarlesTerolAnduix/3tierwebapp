@@ -13,3 +13,15 @@ variable "db_password" {
   description = "The password for the RDS database"
   sensitive   = true
 }
+
+variable "multi_az" {
+  type = bool
+}
+
+variable "deletion_protection" {
+  type = bool
+}
+
+variable "backup_retention_period" {
+  type = number
+}

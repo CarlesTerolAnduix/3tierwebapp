@@ -5,10 +5,4 @@ terraform {
       version = "~> 6.0"
     }
   }
-
-  required_version = ">= 1.5.0"
-}
-
-provider "aws" {
-  region = var.env == "stage" ? "us-east-1" : "us-east-2"
 }

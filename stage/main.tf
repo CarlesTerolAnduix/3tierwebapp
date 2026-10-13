@@ -3,7 +3,10 @@ provider "aws" {
 }
 
 module "stage" {
-  source      = "../modules"
-  env         = "stage"
-  db_password = var.db_password
+  source                  = "../modules"
+  env                     = "stage"
+  db_password             = var.db_password
+  multi_az                = false
+  deletion_protection     = false
+  backup_retention_period = 0
 }
