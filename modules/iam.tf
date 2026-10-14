@@ -28,7 +28,7 @@ resource "aws_iam_role_policy" "ec2_rds_connect" {
     Statement = [{
       Effect   = "Allow"
       Action   = "rds-db:connect"
-      Resource = "arn:aws:rds-db:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:dbuser:${aws_db_instance.webserver_db.resource_id}/webapp"
+      Resource = "arn:aws:rds-db:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:dbuser:${aws_db_instance.webserver_db.resource_id}/${local.db_iam_user}"
     }]
   })
 }
@@ -48,7 +48,7 @@ resource "aws_iam_role_policy" "ec2_read_db_secret" {
       Effect = "Allow"
       Action = [
         "secretsmanager:GetSecretValue",
-        "secretsmanager:DescribeSecret"
+        "secretsmanager:DescribeSecret",
       ]
       Resource = aws_db_instance.webserver_db.master_user_secret[0].secret_arn
     }]

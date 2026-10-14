@@ -1,20 +1,48 @@
 #!/bin/bash
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y apache2 php libapache2-mod-php php-mysql awscli
+apt-get install -y apache2 php libapache2-mod-php php-mysql awscli mysql-client cron
 
 TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
 AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
 
 mkdir -p /etc/webapp
+curl -s -o /etc/webapp/rds-ca.pem https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem
+
+# Bootstrap (idempotente): con la contraseña de admin, crea la tabla y el usuario webapp con IAM auth.
 for i in $(seq 1 30); do
-  if aws secretsmanager get-secret-value --region ${region} --secret-id ${secret_arn} --query SecretString --output text > /etc/webapp/db.json; then
+  ADMIN_PW=$(aws secretsmanager get-secret-value --region ${region} --secret-id ${secret_arn} --query SecretString --output text | python3 -c 'import sys,json;print(json.load(sys.stdin)["password"])') && [ -n "$ADMIN_PW" ] && break
+  sleep 10
+done
+
+for i in $(seq 1 30); do
+  if MYSQL_PWD="$ADMIN_PW" mysql -h ${db_host} -P ${db_port} -u admin ${db_name} <<'SQL'
+CREATE TABLE IF NOT EXISTS records (id INT AUTO_INCREMENT PRIMARY KEY, az VARCHAR(20), note VARCHAR(255), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE USER IF NOT EXISTS '${db_user}'@'%' IDENTIFIED WITH AWSAuthenticationPlugin AS 'RDS' REQUIRE SSL;
+GRANT SELECT, INSERT ON records TO '${db_user}'@'%';
+SQL
+  then
     break
   fi
   sleep 10
 done
-chown root:www-data /etc/webapp/db.json
-chmod 640 /etc/webapp/db.json
+unset ADMIN_PW
+
+# Token de IAM auth: dura 15 minutos, se renueva cada 5.
+cat > /usr/local/bin/refresh-db-token.sh <<'SH'
+#!/bin/bash
+TMP=$(mktemp /etc/webapp/.token.XXXXXX)
+if aws rds generate-db-auth-token --hostname ${db_host} --port ${db_port} --region ${region} --username ${db_user} > "$TMP"; then
+  chown root:www-data "$TMP"
+  chmod 640 "$TMP"
+  mv "$TMP" /etc/webapp/db.token
+else
+  rm -f "$TMP"
+fi
+SH
+chmod 750 /usr/local/bin/refresh-db-token.sh
+/usr/local/bin/refresh-db-token.sh
+echo "*/5 * * * * root /usr/local/bin/refresh-db-token.sh" > /etc/cron.d/refresh-db-token
 
 rm -f /var/www/html/index.html
 cat > /var/www/html/index.php <<'PHP'
@@ -24,9 +52,10 @@ $error = null;
 $rows = [];
 try {
     mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
-    $cred = json_decode(file_get_contents("/etc/webapp/db.json"), true);
-    $db = new mysqli("${db_host}", $cred["username"], $cred["password"], "${db_name}");
-    $db->query("CREATE TABLE IF NOT EXISTS records (id INT AUTO_INCREMENT PRIMARY KEY, az VARCHAR(20), note VARCHAR(255), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
+    $token = trim(file_get_contents("/etc/webapp/db.token"));
+    $db = mysqli_init();
+    $db->ssl_set(NULL, NULL, "/etc/webapp/rds-ca.pem", NULL, NULL);
+    $db->real_connect("${db_host}", "${db_user}", $token, "${db_name}", ${db_port}, NULL, MYSQLI_CLIENT_SSL | MYSQLI_CLIENT_SSL_VERIFY_SERVER_CERT);
     if ($_SERVER["REQUEST_METHOD"] === "POST" && !empty($_POST["note"])) {
         $stmt = $db->prepare("INSERT INTO records (az, note) VALUES (?, ?)");
         $stmt->bind_param("ss", $az, $_POST["note"]);

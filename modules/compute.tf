@@ -20,6 +20,8 @@ resource "aws_launch_template" "webserver" {
   user_data = base64encode(templatefile("${path.module}/user_data.sh.tftpl", {
     db_host    = aws_db_instance.webserver_db.address
     db_name    = aws_db_instance.webserver_db.db_name
+    db_port    = local.db_port
+    db_user    = local.db_iam_user
     region     = data.aws_region.current.region
     secret_arn = aws_db_instance.webserver_db.master_user_secret[0].secret_arn
   }))
@@ -59,7 +61,10 @@ resource "aws_autoscaling_group" "webserver_asg" {
     version = "$Latest"
   }
 
-  depends_on = [aws_iam_role_policy.ec2_read_db_secret]
+  depends_on = [
+    aws_iam_role_policy.ec2_rds_connect,
+    aws_iam_role_policy.ec2_read_db_secret,
+  ]
 
   tag {
     key                 = "Name"

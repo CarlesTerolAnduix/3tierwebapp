@@ -1,8 +1,9 @@
 # SECURITY
 
 locals {
-  http_port = 80
-  db_port   = 3306
+  http_port   = 80
+  db_port     = 3306
+  db_iam_user = "webapp"
 }
 
 resource "aws_security_group" "alb_sg" {
