@@ -38,9 +38,9 @@ flowchart TB
 - VPC con 6 subnets en 2 AZ (2 públicas, 2 de aplicación y 2 de datos), internet gateway, NAT gateway y route tables separadas (pública y privada).
 - Application Load Balancer con listener HTTP y target group con health check.
 - Launch template y Auto Scaling Group (`health_check_type = "ELB"`, así que las instancias que no responden se reemplazan).
-- RDS MySQL 8.0 cifrada en reposo (`storage_encrypted`), con subnet group propio.
-- Tres security groups y un role de IAM con su instance profile.
-- `user_data` que instala Apache y PHP y publica la aplicación de prueba.
+- RDS MySQL 8.0 cifrada en reposo (`storage_encrypted`), con subnet group propio y la contraseña del usuario maestro generada y rotada por RDS en AWS Secrets Manager (`manage_master_user_password`).
+- Tres security groups y un role de IAM con su instance profile, con permiso para leer ese secreto.
+- `user_data` que instala Apache, PHP y el AWS CLI, descarga el secreto de la base de datos al arrancar y publica la aplicación de prueba.
 
 ## Estructura del repositorio
 
@@ -66,7 +66,7 @@ Son variables del módulo sin valor por defecto: Terraform obliga a decidirlas e
 
 ## Cómo desplegar
 
-**Requisitos:** Terraform >= 1.10 (el backend usa el bloqueo nativo de S3 con `use_lockfile`, sin DynamoDB), AWS CLI con credenciales configuradas y permisos sobre los servicios anteriores.
+**Requisitos:** Terraform >= 1.10 (el backend usa el bloqueo nativo de S3 con `use_lockfile`, sin DynamoDB), AWS CLI con credenciales configuradas y permisos sobre los servicios anteriores. No hay que definir ninguna contraseña: la genera RDS.
 
 1. **Crear el bucket de state** (una sola vez):
 
@@ -78,13 +78,7 @@ Son variables del módulo sin valor por defecto: Terraform obliga a decidirlas e
 
    Después, usa el nombre del bucket en el bloque `backend "s3"` de `stage/terraform.tf` y `prod/terraform.tf`.
 
-2. **Definir la contraseña de la base de datos** como variable de entorno (PowerShell). Usa solo letras y números, de 8 caracteres o más:
-
-   ```
-   $env:TF_VAR_db_password = "<tu-contraseña>"
-   ```
-
-3. **Desplegar un entorno:**
+2. **Desplegar un entorno:**
 
    ```
    cd stage
@@ -93,9 +87,9 @@ Son variables del módulo sin valor por defecto: Terraform obliga a decidirlas e
    terraform apply
    ```
 
-4. **Probar:** abre el valor del output `alb_dns` en el navegador, con `http://` (no hay HTTPS). La RDS tarda unos 10 minutos y las instancias unos minutos más en pasar el health check; hasta entonces el ALB devuelve 503.
+3. **Probar:** abre el valor del output `alb_dns` en el navegador, con `http://` (no hay HTTPS). La RDS tarda unos 10 minutos y las instancias unos minutos más en pasar el health check; hasta entonces el ALB devuelve 503.
 
-5. **Destruir al terminar:**
+4. **Destruir al terminar:**
 
    ```
    terraform destroy
@@ -110,22 +104,23 @@ El NAT gateway, el ALB y la RDS cobran por hora aunque no reciban tráfico. El N
 ## Estado del proyecto
 
 - **stage:** desplegado, probado y destruido. La aplicación responde a través del ALB y guarda registros en RDS desde ambas AZ.
-- **prod:** `terraform plan` validado (37 recursos a crear). Pendiente de desplegar y probar de verdad en us-east-2.
+- **prod:** desplegado, probado y destruido en us-east-2, con RDS Multi-AZ.
 
 ## Decisiones y limitaciones conocidas
 
-- **Contraseña de RDS por variable sensible.** Se pasa con `TF_VAR_db_password` y la aplicación se conecta como `admin`. Aunque la variable está marcada como `sensitive`, la contraseña acaba en texto plano en el state (que está en un bucket de S3) y en el `user_data` de las instancias, visible en la consola de AWS. Es un paso intermedio consciente, no el diseño final.
+- **La contraseña sigue existiendo en disco.** RDS la genera, la guarda en Secrets Manager y ya no pasa por el código, el state ni el `user_data`, pero cada instancia la descarga al arrancar a `/etc/webapp/db.json` (propietario root, grupo `www-data`, permisos 640) y la aplicación entra como `admin`. Además, RDS la rota cada 7 días: una instancia que lleve más tiempo encendida dejaría de conectar. En un laboratorio que se destruye a diario no ocurre, y la solución definitiva es la autenticación IAM (ver abajo).
 - **IAM auth preparada, pero sin usar.** El role de las EC2 ya tiene el permiso `rds-db:connect`, pero la autenticación IAM no está activada en la instancia (la opción está comentada) y la aplicación entra con contraseña. Para usarla hay que activarla, crear a mano en MySQL un usuario `webapp` con el plugin de autenticación de IAM, y conectar con SSL.
 - **Un único NAT gateway.** Está en una sola AZ: si esa AZ cae, las instancias de la otra pierden la salida a internet. Es suficiente para un laboratorio, y la versión de alta disponibilidad (un NAT por AZ) multiplica el coste.
 - **Solo HTTP.** El listener escucha en el puerto 80. HTTPS exigiría un dominio y un certificado en ACM.
-- **Salida de las EC2 abierta a internet** (puerto 80 hacia `0.0.0.0/0`, suficiente para `apt`), porque los mirrors de paquetes no tienen IP fija. Restringirla por dominio requeriría un proxy o AWS Network Firewall.
+- **Salida de las EC2 abierta a internet** (puertos 80 y 443 hacia `0.0.0.0/0`: el 80 para `apt` y el 443 para la API de Secrets Manager), porque los mirrors de paquetes no tienen IP fija. Restringirla por dominio requeriría un proxy o AWS Network Firewall.
 - **Sin NACLs.** Las security groups cubren la cadena ALB → EC2 → RDS, y las NACLs (stateless) añadirían complejidad sin una necesidad concreta.
 - **`skip_final_snapshot = true`** en la RDS, pensado para un laboratorio que se destruye a menudo. En una producción real estaría en `false`.
 
 ## Siguientes pasos
 
-- [ ] Desplegar y validar `prod` en us-east-2.
-- [ ] Sustituir la contraseña en variable por AWS Secrets Manager (`manage_master_user_password`) y usar IAM auth con un usuario `webapp` de privilegios limitados.
+- [x] Desplegar y validar `prod` en us-east-2.
+- [x] Contraseña de RDS gestionada por AWS Secrets Manager (`manage_master_user_password`).
+- [ ] Autenticación IAM con un usuario `webapp` de privilegios limitados, para que la aplicación no guarde ninguna contraseña.
 - [ ] Acceso a las instancias por SSM Session Manager, sin abrir SSH.
 - [ ] HTTPS con ACM.
 - [ ] Un NAT gateway por AZ.

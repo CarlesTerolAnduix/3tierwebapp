@@ -6,6 +6,6 @@ module "prod" {
   source                  = "../modules"
   env                     = "prod"
   multi_az                = true
-  deletion_protection     = false
+  deletion_protection     = true
   backup_retention_period = 7
 }
