@@ -38,9 +38,9 @@ flowchart TB
 - VPC con 6 subnets en 2 AZ (2 públicas, 2 de aplicación y 2 de datos), internet gateway, NAT gateway y route tables separadas (pública y privada).
 - Application Load Balancer con listener HTTP y target group con health check.
 - Launch template y Auto Scaling Group (`health_check_type = "ELB"`, así que las instancias que no responden se reemplazan).
-- RDS MySQL 8.0 cifrada en reposo (`storage_encrypted`), con subnet group propio y la contraseña del usuario maestro generada y rotada por RDS en AWS Secrets Manager (`manage_master_user_password`).
-- Tres security groups y un role de IAM con su instance profile, con permiso para leer ese secreto.
-- `user_data` que instala Apache, PHP y el AWS CLI, descarga el secreto de la base de datos al arrancar y publica la aplicación de prueba.
+- RDS MySQL 8.0 cifrada en reposo (`storage_encrypted`), con subnet group propio, autenticación IAM activada (`iam_database_authentication_enabled`) y la contraseña del usuario maestro generada y rotada por RDS en AWS Secrets Manager (`manage_master_user_password`).
+- Tres security groups y un role de IAM con su instance profile, con permiso `rds-db:connect` (solo para el usuario `webapp`) y permiso para leer el secreto del usuario maestro.
+- `user_data` que instala Apache, PHP y el AWS CLI y, al arrancar, usa el usuario maestro una sola vez para crear la tabla y el usuario `webapp` (con el plugin de autenticación IAM y permisos solo de `SELECT` e `INSERT`). Después publica la aplicación, que se conecta como `webapp` con un token de IAM, sin contraseña, y verificando el certificado de RDS.
 
 ## Estructura del repositorio
 
@@ -103,16 +103,23 @@ El NAT gateway, el ALB y la RDS cobran por hora aunque no reciban tráfico. El N
 
 ## Estado del proyecto
 
-- **stage:** desplegado, probado y destruido. La aplicación responde a través del ALB y guarda registros en RDS desde ambas AZ.
-- **prod:** desplegado, probado y destruido en us-east-2, con RDS Multi-AZ.
+- **stage:** desplegado, probado y destruido. La aplicación responde a través del ALB y guarda registros en RDS desde ambas AZ, conectando con IAM auth.
+- **prod:** desplegado, probado y destruido en us-east-2, con RDS Multi-AZ (antes de añadir IAM auth; solo se ha probado esta versión en stage).
+
+## Cómo se conecta la aplicación a la base de datos
+
+1. La instancia descarga el bundle de certificados de RDS (`/etc/webapp/rds-ca.pem`).
+2. Con la contraseña del usuario maestro (leída de Secrets Manager) crea la tabla y el usuario `webapp` (`AWSAuthenticationPlugin`, `REQUIRE SSL`, solo `SELECT` e `INSERT`). Es idempotente: si ya existen, no hace nada.
+3. Un cron genera cada 5 minutos un token de IAM para `webapp` (válido 15 minutos) y lo guarda en `/etc/webapp/db.token` (propietario root, grupo `www-data`, permisos 640).
+4. La página PHP lee ese token y lo usa como contraseña en una conexión SSL con verificación del certificado.
 
 ## Decisiones y limitaciones conocidas
 
-- **La contraseña sigue existiendo en disco.** RDS la genera, la guarda en Secrets Manager y ya no pasa por el código, el state ni el `user_data`, pero cada instancia la descarga al arrancar a `/etc/webapp/db.json` (propietario root, grupo `www-data`, permisos 640) y la aplicación entra como `admin`. Además, RDS la rota cada 7 días: una instancia que lleve más tiempo encendida dejaría de conectar. En un laboratorio que se destruye a diario no ocurre, y la solución definitiva es la autenticación IAM (ver abajo).
-- **IAM auth preparada, pero sin usar.** El role de las EC2 ya tiene el permiso `rds-db:connect`, pero la autenticación IAM no está activada en la instancia (la opción está comentada) y la aplicación entra con contraseña. Para usarla hay que activarla, crear a mano en MySQL un usuario `webapp` con el plugin de autenticación de IAM, y conectar con SSL.
+- **Las EC2 siguen pudiendo leer la contraseña del usuario maestro.** La aplicación ya no usa contraseña (entra como `webapp` con tokens de IAM de 15 minutos, que son lo único que queda en disco), pero el bootstrap del usuario `webapp` se hace desde el `user_data` con el usuario maestro, así que el role de las instancias conserva el permiso de leer ese secreto. Si una EC2 se comprometiera, un atacante podría leerlo y entrar como `admin`. La mejora es sacar el bootstrap de las EC2 (por ejemplo, una Lambda dentro de la VPC invocada desde Terraform con `aws_lambda_invocation` y con su propio role) y quitarles ese permiso.
+- **El usuario `webapp` se crea en cada despliegue.** La base de datos se recrea con cada `destroy`/`apply`, y las instancias vuelven a ejecutar el bootstrap. El `user_data` solo se ejecuta al crear una instancia: cambiar la plantilla no afecta a las que ya existen hasta que se reemplazan.
 - **Un único NAT gateway.** Está en una sola AZ: si esa AZ cae, las instancias de la otra pierden la salida a internet. Es suficiente para un laboratorio, y la versión de alta disponibilidad (un NAT por AZ) multiplica el coste.
 - **Solo HTTP.** El listener escucha en el puerto 80. HTTPS exigiría un dominio y un certificado en ACM.
-- **Salida de las EC2 abierta a internet** (puertos 80 y 443 hacia `0.0.0.0/0`: el 80 para `apt` y el 443 para la API de Secrets Manager), porque los mirrors de paquetes no tienen IP fija. Restringirla por dominio requeriría un proxy o AWS Network Firewall.
+- **Salida de las EC2 abierta a internet** (puertos 80 y 443 hacia `0.0.0.0/0`: el 80 para `apt` y el 443 para la API de Secrets Manager y para descargar el bundle de certificados de RDS), porque los mirrors de paquetes no tienen IP fija. Restringirla por dominio requeriría un proxy o AWS Network Firewall.
 - **Sin NACLs.** Las security groups cubren la cadena ALB → EC2 → RDS, y las NACLs (stateless) añadirían complejidad sin una necesidad concreta.
 - **`skip_final_snapshot = true`** en la RDS, pensado para un laboratorio que se destruye a menudo. En una producción real estaría en `false`.
 
@@ -120,7 +127,8 @@ El NAT gateway, el ALB y la RDS cobran por hora aunque no reciban tráfico. El N
 
 - [x] Desplegar y validar `prod` en us-east-2.
 - [x] Contraseña de RDS gestionada por AWS Secrets Manager (`manage_master_user_password`).
-- [ ] Autenticación IAM con un usuario `webapp` de privilegios limitados, para que la aplicación no guarde ninguna contraseña.
+- [x] Autenticación IAM con un usuario `webapp` de privilegios limitados: la aplicación no usa ninguna contraseña.
+- [ ] Bootstrap del usuario `webapp` fuera de las EC2 (Lambda) para retirarles el acceso al secreto del usuario maestro.
 - [ ] Acceso a las instancias por SSM Session Manager, sin abrir SSH.
 - [ ] HTTPS con ACM.
 - [ ] Un NAT gateway por AZ.
