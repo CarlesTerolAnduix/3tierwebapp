@@ -18,11 +18,10 @@ resource "aws_launch_template" "webserver" {
   vpc_security_group_ids = [aws_security_group.webserver_sg.id]
 
   user_data = base64encode(templatefile("${path.module}/user_data.sh.tftpl", {
-    db_host     = aws_db_instance.webserver_db.address
-    db_port     = local.db_port
-    db_name     = aws_db_instance.webserver_db.db_name
-    db_user     = aws_db_instance.webserver_db.username
-    db_password = var.db_password
+    db_host    = aws_db_instance.webserver_db.address
+    db_name    = aws_db_instance.webserver_db.db_name
+    region     = data.aws_region.current.region
+    secret_arn = aws_db_instance.webserver_db.master_user_secret[0].secret_arn
   }))
 
   iam_instance_profile {
@@ -59,6 +58,8 @@ resource "aws_autoscaling_group" "webserver_asg" {
     id      = aws_launch_template.webserver.id
     version = "$Latest"
   }
+
+  depends_on = [aws_iam_role_policy.ec2_read_db_secret]
 
   tag {
     key                 = "Name"

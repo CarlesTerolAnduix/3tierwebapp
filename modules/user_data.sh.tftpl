@@ -1,10 +1,20 @@
 #!/bin/bash
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y apache2 php libapache2-mod-php php-mysql
+apt-get install -y apache2 php libapache2-mod-php php-mysql awscli
 
 TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
 AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+
+mkdir -p /etc/webapp
+for i in $(seq 1 30); do
+  if aws secretsmanager get-secret-value --region ${region} --secret-id ${secret_arn} --query SecretString --output text > /etc/webapp/db.json; then
+    break
+  fi
+  sleep 10
+done
+chown root:www-data /etc/webapp/db.json
+chmod 640 /etc/webapp/db.json
 
 rm -f /var/www/html/index.html
 cat > /var/www/html/index.php <<'PHP'
@@ -14,7 +24,8 @@ $error = null;
 $rows = [];
 try {
     mysqli_report(MYSQLI_REPORT_ERROR | MYSQLI_REPORT_STRICT);
-    $db = new mysqli("${db_host}", "${db_user}", "${db_password}", "${db_name}");
+    $cred = json_decode(file_get_contents("/etc/webapp/db.json"), true);
+    $db = new mysqli("${db_host}", $cred["username"], $cred["password"], "${db_name}");
     $db->query("CREATE TABLE IF NOT EXISTS records (id INT AUTO_INCREMENT PRIMARY KEY, az VARCHAR(20), note VARCHAR(255), created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)");
     if ($_SERVER["REQUEST_METHOD"] === "POST" && !empty($_POST["note"])) {
         $stmt = $db->prepare("INSERT INTO records (az, note) VALUES (?, ?)");

@@ -37,3 +37,20 @@ resource "aws_iam_instance_profile" "webserver" {
   name = "ec2-rds-${var.env}"
   role = aws_iam_role.ec2_rds_role.name
 }
+
+resource "aws_iam_role_policy" "ec2_read_db_secret" {
+  name = "ec2-read-db-secret-${var.env}"
+  role = aws_iam_role.ec2_rds_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Action = [
+        "secretsmanager:GetSecretValue",
+        "secretsmanager:DescribeSecret"
+      ]
+      Resource = aws_db_instance.webserver_db.master_user_secret[0].secret_arn
+    }]
+  })
+}

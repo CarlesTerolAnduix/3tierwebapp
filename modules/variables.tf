@@ -8,12 +8,6 @@ variable "env" {
   }
 }
 
-variable "db_password" {
-  type        = string
-  description = "The password for the RDS database"
-  sensitive   = true
-}
-
 variable "multi_az" {
   type = bool
 }
