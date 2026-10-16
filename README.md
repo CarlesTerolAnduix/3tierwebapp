@@ -8,33 +8,49 @@ La app de prueba es una página PHP que muestra en qué zona de disponibilidad s
 
 ```mermaid
 flowchart TB
-    Internet((Internet)) -->|HTTP 80| Public
+    Internet(["🌐 Internet"])
 
-    subgraph VPC["VPC (10.0.0.0/16)"]
+    subgraph VPC["VPC · 10.0.0.0/16"]
         direction TB
-        subgraph Public["Tier 1 · Subnets públicas (ALB)"]
-            direction LR
-            PubA["public-a · AZ a<br/>10.0.5.0/24<br/>ALB + NAT Gateway"]
-            PubB["public-b · AZ b<br/>10.0.6.0/24<br/>ALB"]
+        subgraph AZB["Zona de disponibilidad B"]
+            direction TB
+            PubB["<b>Subnet pública B</b><br/>10.0.6.0/24<br/>ALB"]
+            AppB["<b>Subnet de aplicación B</b><br/>10.0.2.0/24<br/>EC2 · Apache + PHP"]
+            DbB[("<b>Subnet de datos B</b><br/>10.0.4.0/24<br/>RDS MySQL · standby (solo prod)")]
+            PubB -->|HTTP 80| AppB -->|MySQL 3306| DbB
         end
-        subgraph App["Tier 2 · Subnets de aplicación"]
-            direction LR
-            AppA["ec2-a · AZ a<br/>10.0.1.0/24<br/>EC2 (ASG) · Apache + PHP"]
-            AppB["ec2-b · AZ b<br/>10.0.2.0/24<br/>EC2 (ASG) · Apache + PHP"]
-        end
-        subgraph Data["Tier 3 · Subnets de datos"]
-            direction LR
-            DbA["db-a · AZ a<br/>10.0.3.0/24<br/>RDS MySQL (primaria)"]
-            DbB["db-b · AZ b<br/>10.0.4.0/24<br/>RDS MySQL (standby, solo prod)"]
+        subgraph AZA["Zona de disponibilidad A"]
+            direction TB
+            PubA["<b>Subnet pública A</b><br/>10.0.5.0/24<br/>ALB · NAT Gateway"]
+            AppA["<b>Subnet de aplicación A</b><br/>10.0.1.0/24<br/>EC2 · Apache + PHP"]
+            DbA[("<b>Subnet de datos A</b><br/>10.0.3.0/24<br/>RDS MySQL · primaria")]
+            PubA -->|HTTP 80| AppA -->|MySQL 3306| DbA
         end
     end
 
-    Public -->|HTTP 80| App
-    App -->|MySQL 3306| Data
-    App -.->|salida a internet vía NAT| Public
+    Internet -->|HTTP 80| PubA
+    Internet --> PubB
+
+    classDef pub fill:#dbeafe,stroke:#3b82f6,color:#111
+    classDef app fill:#dcfce7,stroke:#22c55e,color:#111
+    classDef db fill:#fef3c7,stroke:#f59e0b,color:#111
+    classDef net fill:#f3f4f6,stroke:#6b7280,color:#111
+    class PubA,PubB pub
+    class AppA,AppB app
+    class DbA,DbB db
+    class Internet net
+    style VPC fill:none,stroke:#6b7280
+    style AZA fill:none,stroke:#9ca3af,stroke-dasharray:5 4
+    style AZB fill:none,stroke:#9ca3af,stroke-dasharray:5 4
 ```
 
-El ALB tiene una interfaz en cada subnet pública y reparte el tráfico entre las EC2 de las dos AZ. El NAT gateway está solo en `public-a`. En prod, RDS Multi-AZ mantiene una réplica en espera en `db-b` (en stage no hay standby).
+Cada flecha es una dependencia de tráfico permitida por los security groups. Notas sobre lo que el dibujo no muestra:
+
+- El ALB es un único balanceador con una interfaz en cada subnet pública y reparte las peticiones entre las EC2 de las dos AZ, no solo entre las de su propia columna.
+- Las EC2 salen a internet por el NAT gateway, que está solo en la subnet pública A.
+- En prod, RDS Multi-AZ replica de forma síncrona la base de datos primaria (AZ A) a la standby (AZ B). En stage no hay standby.
+
+Por tier:
 
 - **Tier 1:** un ALB público en dos subnets públicas, una por AZ. Es el único recurso que recibe tráfico de internet.
 - **Tier 2:** instancias EC2 en un Auto Scaling Group (mínimo 2, repartidas entre las dos AZ) en subnets privadas. Salen a internet por el NAT para instalar paquetes, pero nadie puede iniciar una conexión hacia ellas. Para administrarlas se entra con SSM Session Manager (sin SSH ni puertos de entrada).
@@ -111,8 +127,8 @@ El NAT gateway, el ALB y la RDS cobran por hora aunque no reciban tráfico. El N
 
 ## Estado del proyecto
 
-- **stage:** desplegado, probado y destruido. La aplicación responde a través del ALB y guarda registros en RDS desde ambas AZ, conectando con IAM auth. El acceso a las instancias por SSM Session Manager y la conexión manual como `webapp` (con `SHOW GRANTS` y pruebas de permisos denegados) también se han verificado.
-- **prod:** desplegado, probado y destruido también en us-east-2, con RDS Multi-AZ, IAM auth y acceso por SSM.
+- **stage** (us-east-1): desplegado, probado y destruido. La aplicación responde a través del ALB y guarda registros en RDS desde ambas AZ, conectando con IAM auth. También se verificó la conexión manual como `webapp` por SSM Session Manager (`SHOW GRANTS` y operaciones denegadas).
+- **prod** (us-east-2): desplegado, probado con éxito y destruido, con RDS Multi-AZ, IAM auth y acceso por SSM. La aplicación funciona igual que en stage.
 
 ## Cómo se conecta la aplicación a la base de datos
 
